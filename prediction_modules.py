@@ -103,93 +103,105 @@ class ScoreDecoder(nn.Module):
         self.weights_decoder = nn.Sequential(nn.Linear(256, 64), nn.ELU(), nn.Linear(64, self._n_latent_features+4), nn.Softplus())
 
     def get_hardcoded_features(self, ego_traj, max_time):
+        '''将ego的M条规划轨迹（时间步为T）提取特征到4维， output:B,M,4 '''
         # ego_traj: B, M, T, 6
-        # x, y, yaw, v, a, r
+        # x, y, yaw, v, a, r曲率
 
-        speed = ego_traj[:, :, :max_time, 3]
-        acceleration = ego_traj[:, :, :max_time, 4]
-        jerk = torch.diff(acceleration, dim=-1) / 0.1
-        jerk = torch.cat((jerk[:, :, :1], jerk), dim=-1)
-        curvature = ego_traj[:, :, :max_time, 5]
-        lateral_acceleration = speed ** 2 * curvature
+        speed = ego_traj[:, :, :max_time, 3] # B,M,T
+        acceleration = ego_traj[:, :, :max_time, 4] # B,M,T
+        jerk = torch.diff(acceleration, dim=-1) / 0.1 # B,M,T-1
+        jerk = torch.cat((jerk[:, :, :1], jerk), dim=-1)# B,M,T
+        curvature = ego_traj[:, :, :max_time, 5] # B,M,T
+        lateral_acceleration = speed ** 2 * curvature # B,M,T
 
-        speed = -speed.mean(-1).clip(0, 15) / 15
-        acceleration = acceleration.abs().mean(-1).clip(0, 4) / 4
-        jerk = jerk.abs().mean(-1).clip(0, 6) / 6
-        lateral_acceleration = lateral_acceleration.abs().mean(-1).clip(0, 5) / 5
+        speed = -speed.mean(-1).clip(0, 15) / 15 # B,M, 平均速度取反
+        acceleration = acceleration.abs().mean(-1).clip(0, 4) / 4 # B, M 平均加速度
+        jerk = jerk.abs().mean(-1).clip(0, 6) / 6 # B,M 平均加加速度
+        lateral_acceleration = lateral_acceleration.abs().mean(-1).clip(0, 5) / 5 # B,M 平均横向加速度
 
-        features = torch.stack((speed, acceleration, jerk, lateral_acceleration), dim=-1)
+        features = torch.stack((speed, acceleration, jerk, lateral_acceleration), dim=-1) # B,M,4
 
         return features
     
     def calculate_collision(self, ego_traj, agent_traj, agents_states, max_time):
-        # ego_traj: B, T, 3
+        # ego_traj: B, T, 6
         # agent_traj: B, N, T, 3
         # agents_states: B, N, 11
 
         agent_mask = torch.ne(agents_states.sum(-1), 0) # B, N
 
         # Compute the distance between the two agents
-        dist = torch.norm(ego_traj[:, None, :max_time, :2] - agent_traj[:, :, :max_time, :2], dim=-1)
+        dist = torch.norm(ego_traj[:, None, :max_time, :2] - agent_traj[:, :, :max_time, :2], dim=-1) # B, 1, 50, 2 - B,N,50,2 -> B,N,50
     
         # Compute the collision cost
-        cost = torch.exp(-0.2 * dist ** 2) * agent_mask[:, :, None]
-        cost = cost.sum(-1).sum(-1)
+        cost = torch.exp(-0.2 * dist ** 2) * agent_mask[:, :, None] # B,N,50
+        cost = cost.sum(-1).sum(-1)# B
 
         return cost
     
     def get_latent_interaction_features(self, ego_traj, agent_traj, agents_states, max_time):
         # ego_traj: B, T, 6
-        # agent_traj: B, N, T, 3
+        # agent_traj: B, N, T, 3            N=_neighbors
         # agents_states: B, N, 11
 
         # Get agent mask
         agent_mask = torch.ne(agents_states.sum(-1), 0) # B, N
 
         # Get relative attributes of agents
-        relative_yaw = agent_traj[:, :, :max_time, 2] - ego_traj[:, None, :max_time, 2]
+        relative_yaw = agent_traj[:, :, :max_time, 2] - ego_traj[:, None, :max_time, 2]#B,N,T, - B,1,T,  计算一个ego的一个轨迹和N个agent的1个轨迹在T时间区间内的相对角度
         relative_yaw = torch.atan2(torch.sin(relative_yaw), torch.cos(relative_yaw))
-        relative_pos = agent_traj[:, :, :max_time, :2] - ego_traj[:, None, :max_time, :2]
+        relative_pos = agent_traj[:, :, :max_time, :2] - ego_traj[:, None, :max_time, :2] # B,N,T,2 - B,1,T,2 计算一个ego的一个轨迹和N个agent的1个轨迹在T时间区间内的相对位置
         relative_pos = torch.stack([relative_pos[..., 0] * torch.cos(relative_yaw), 
                                     relative_pos[..., 1] * torch.sin(relative_yaw)], dim=-1)
-        agent_velocity = torch.diff(agent_traj[:, :, :max_time, :2], dim=-2) / 0.1
-        agent_velocity = torch.cat((agent_velocity[:, :, :1, :], agent_velocity), dim=-2)
-        ego_velocity_x = ego_traj[:, :max_time, 3] * torch.cos(ego_traj[:, :max_time, 2])
+        agent_velocity = torch.diff(agent_traj[:, :, :max_time, :2], dim=-2) / 0.1 # B,N,T-1, 2
+        agent_velocity = torch.cat((agent_velocity[:, :, :1, :], agent_velocity), dim=-2) # B,N,T,2
+        ego_velocity_x = ego_traj[:, :max_time, 3] * torch.cos(ego_traj[:, :max_time, 2])#BT*BT
         ego_velocity_y = ego_traj[:, :max_time, 3] * torch.sin(ego_traj[:, :max_time, 2])
-        relative_velocity = torch.stack([(agent_velocity[..., 0] - ego_velocity_x[:, None]) * torch.cos(relative_yaw),
-                                         (agent_velocity[..., 1] - ego_velocity_y[:, None]) * torch.sin(relative_yaw)], dim=-1) 
-        relative_attributes = torch.cat((relative_pos, relative_yaw.unsqueeze(-1), relative_velocity), dim=-1)
+        relative_velocity = torch.stack([(agent_velocity[..., 0] - ego_velocity_x[:, None]) * torch.cos(relative_yaw), # stack(BNT-B1T)
+                                         (agent_velocity[..., 1] - ego_velocity_y[:, None]) * torch.sin(relative_yaw)], dim=-1)  # BNT2 得到一个ego和N个agent的1个轨迹在T时间区间内的相对速度
+        relative_attributes = torch.cat((relative_pos, relative_yaw.unsqueeze(-1), relative_velocity), dim=-1) # B, N, T, 5得到1个ego的一个轨迹和N个agent的1个轨迹在T区间的相对特征
 
         # Get agent attributes
-        agent_attributes = agents_states[:, :, None, 6:].expand(-1, -1, relative_attributes.shape[2], -1)
-        attributes = torch.cat((relative_attributes, agent_attributes), dim=-1)
-        attributes = attributes * agent_mask[:, :, None, None]
+        agent_attributes = agents_states[:, :, None, 6:].expand(-1, -1, relative_attributes.shape[2], -1) # B, N, 11-> B,N,1,5->B,N,T,5
+        attributes = torch.cat((relative_attributes, agent_attributes), dim=-1) # B,N,T,5 + 5 将1个ego的一个轨迹和N个agent的1个轨迹在T区间的相对特征
+        attributes = attributes * agent_mask[:, :, None, None]# B,N,T,10* B,N,1,1
 
         # Encode relative attributes and decode to latent interaction features
-        features = self.interaction_feature_encoder(attributes)
-        features = features.max(1).values.mean(1)
-        features = self.interaction_feature_decoder(features)
+        features = self.interaction_feature_encoder(attributes) # B,N,T,256
+        features = features.max(1).values.mean(1)# B,N,T,256 -> B,T,256-> B,256 求所有agent的最大的，时间步平均的feature
+        features = self.interaction_feature_decoder(features) # B,4
   
         return features
 
     def forward(self, ego_traj, ego_encoding, agents_traj, agents_states, timesteps):
-        ego_traj_features = self.get_hardcoded_features(ego_traj, timesteps)
+        '''
+        M条规划轨迹
+        - ego_traj: B,M,T,6
+        - ego_encoding: B, 256 
+        - agents_traj: B, M, N, T, 3 缺点没有考虑多模态性
+        - agents_states: B, N, 11
+        计算
+
+        weights:  B,8 用来权衡 hardcode和interaction的feature权重得到最终的scores
+        一个交互场景对应一个score和collision_feature
+        '''
+        ego_traj_features = self.get_hardcoded_features(ego_traj, timesteps) # B,M,4   获取自车规划轨迹的一些编码特征
         if not self._variable_cost:
             ego_encoding = torch.ones_like(ego_encoding)
-        weights = self.weights_decoder(ego_encoding)
-        ego_mask = torch.ne(ego_traj.sum(-1).sum(-1), 0)
+        weights = self.weights_decoder(ego_encoding) # B,8 用来权衡 hardcode和interaction的score权重
+        ego_mask = torch.ne(ego_traj.sum(-1).sum(-1), 0) # B,M
 
         scores = []
-        for i in range(agents_traj.shape[1]):
-            hardcoded_features = ego_traj_features[:, i]
-            interaction_features = self.get_latent_interaction_features(ego_traj[:, i], agents_traj[:, i], agents_states, timesteps)
-            features = torch.cat((hardcoded_features, interaction_features), dim=-1)
-            score = -torch.sum(features * weights, dim=-1)
-            collision_feature = self.calculate_collision(ego_traj[:, i], agents_traj[:, i], agents_states, timesteps)
-            score += -10 * collision_feature
-            scores.append(score)
+        for i in range(agents_traj.shape[1]): # M，每一条规划轨迹 BT6  BNT3
+            hardcoded_features = ego_traj_features[:, i] # B,4
+            interaction_features = self.get_latent_interaction_features(ego_traj[:, i], agents_traj[:, i], agents_states, timesteps)#B,3m,4
+            features = torch.cat((hardcoded_features, interaction_features), dim=-1)#B,4 + B,4 = B,8
+            score = -torch.sum(features * weights, dim=-1)# B
+            collision_feature = self.calculate_collision(ego_traj[:, i], agents_traj[:, i], agents_states, timesteps)# B
+            score += -10 * collision_feature 
+            scores.append(score) # M [B,]
 
-        scores = torch.stack(scores, dim=1)
+        scores = torch.stack(scores, dim=1) # B, M
         scores = torch.where(ego_mask, scores, float('-inf'))
 
         return scores, weights

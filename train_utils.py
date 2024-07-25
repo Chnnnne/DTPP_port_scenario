@@ -60,19 +60,30 @@ class DrivingData(Dataset):
 
 
 def calc_loss(neighbors, ego, ego_regularization, scores, weights, ego_gt, neighbors_gt, neighbors_valid):
+    '''
+        neighbors: B,M,_neighbors,T,3
+        ego: B,M,T,6
+        ego_regularization: B,T,3
+        scores: B,M
+        weights: B,8
+        ego_gt: B,T,3
+        neighbors_gt: B,10 ,T,3
+        neighbors_valid: B,10 ,T,3
+    '''
     mask = torch.ne(ego.sum(-1), 0)
-    neighbors = neighbors[:, 0] * neighbors_valid 
-    cmp_loss = F.smooth_l1_loss(neighbors, neighbors_gt, reduction='none')
+    neighbors = neighbors[:, 0] * neighbors_valid # B,neibor,T,3  *  B,neibor,T,3  
+    # agent prediction loss
+    cmp_loss = F.smooth_l1_loss(neighbors, neighbors_gt, reduction='none') # 计算 B,neibor,T,3
     cmp_loss = cmp_loss * mask[:, 0, None, :, None]
-    cmp_loss = cmp_loss.sum() / mask[:, 0].sum()
-
-    regularization_loss = F.smooth_l1_loss(ego_regularization, ego_gt, reduction='none')
+    cmp_loss = cmp_loss.sum() / mask[:, 0].sum() # 1
+    # ego planning loss
+    regularization_loss = F.smooth_l1_loss(ego_regularization, ego_gt, reduction='none') # B,T,3  B,T,3  
     regularization_loss = regularization_loss * mask[:, 0, :, None]
     regularization_loss = regularization_loss.sum() / mask[:, 0].sum()
-
-    label = torch.zeros(scores.shape[0], dtype=torch.long).to(scores.device)    
-    irl_loss = F.cross_entropy(scores, label)
-
+    # score loss
+    label = torch.zeros(scores.shape[0], dtype=torch.long).to(scores.device)     # B
+    irl_loss = F.cross_entropy(scores, label) # B,M
+    # weight loss
     weights_regularization = torch.square(weights).mean()
 
     loss = cmp_loss + irl_loss + 0.1 * regularization_loss + 0.01 * weights_regularization

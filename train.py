@@ -209,7 +209,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_candidates', type=int, help='number of max candidate trajectories', default=30)
     parser.add_argument('--variable_weights', type=bool, help='use variable cost weights', default=False)
     parser.add_argument('--train_epochs', type=int, help='epochs of training', default=30)
-    parser.add_argument('--batch_size', type=int, help='batch size', default=16)
+    parser.add_argument('--batch_size', type=int, help='batch size', default=2)
     parser.add_argument('--learning_rate', type=float, help='learning rate', default=2e-4)
     parser.add_argument('--device', type=str, help='run on which device', default='cuda')
     args = parser.parse_args()

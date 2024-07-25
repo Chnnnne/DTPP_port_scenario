@@ -82,12 +82,17 @@ class Decoder(nn.Module):
         return casual_mask
 
     def forward(self, encoder_outputs, ego_traj_inputs, agents_states, timesteps):
+        '''
+        encoder_outputs: features
+        ego_traj_inputs: ego_traj
+        agents_states: other agent past features [B,all_neighbor_num,T,11]
+        '''
         # get inputs
-        current_states = agents_states[:, :self._neighbors, -1]
-        encoding, encoding_mask = encoder_outputs['encoding'], encoder_outputs['mask']
-        ego_traj_ori_encoding = self.ego_traj_encoder(ego_traj_inputs)
-        branch_embedding = ego_traj_ori_encoding[:, :, timesteps-1]
-        ego_traj_ori_encoding = self.pooling_trajectory(ego_traj_ori_encoding)
+        current_states = agents_states[:, :self._neighbors, -1] # other agent obs point
+        encoding, encoding_mask = encoder_outputs['encoding'], encoder_outputs['mask'] # 
+        ego_traj_ori_encoding = self.ego_traj_encoder(ego_traj_inputs) # 自车规划轨迹编码
+        branch_embedding = ego_traj_ori_encoding[:, :, timesteps-1] # 
+        ego_traj_ori_encoding = self.pooling_trajectory(ego_traj_ori_encoding) 
         time_embedding = self.time_embed(self.time_index)
         tree_embedding = time_embedding[None, :, :, :] + branch_embedding[:, :, None, :]
 
@@ -119,14 +124,15 @@ class Decoder(nn.Module):
             # trajectory outputs
             decoding = torch.cat([env_decoding, ego_condition_decoding], dim=-1)
             trajectory = self.agent_traj_decoder(decoding, current_states[:, i])
-            agents_trajecotries.append(trajectory)
+            agents_trajecotries.append(trajectory) # 他车轨迹预测
 
         # score outputs
-        agents_trajecotries = torch.stack(agents_trajecotries, dim=2)
-        scores, weights = self.scorer(ego_traj_inputs, encoding[:, 0], agents_trajecotries, current_states, timesteps)
+        agents_trajecotries = torch.stack(agents_trajecotries, dim=2) 
+        # input: 自车规划轨迹B,M30,T80,6、自车编码特征B,agent_num236,dim256 、他车预测轨迹B,M30,N10,T80,3、他车观测点特征
+        scores, weights = self.scorer(ego_traj_inputs, encoding[:, 0], agents_trajecotries, current_states, timesteps) #B,M对每个场景的打分  B,8
 
         # ego regularization
-        ego_traj_regularization = self.ego_traj_decoder(encoding[:, 0])
-        ego_traj_regularization = torch.reshape(ego_traj_regularization, (ego_traj_regularization.shape[0], 80, 3))
+        ego_traj_regularization = self.ego_traj_decoder(encoding[:, 0])# B,256->B,max_time*30
+        ego_traj_regularization = torch.reshape(ego_traj_regularization, (ego_traj_regularization.shape[0], 80, 3)) # B,80,3
 
         return agents_trajecotries, scores, ego_traj_regularization, weights
